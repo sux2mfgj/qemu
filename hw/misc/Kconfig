@@ -183,4 +183,8 @@ config AXP2XX_PMU
     bool
     depends on I2C
 
+config PCI_EPC
+    bool
+    default y
+
 source macio/Kconfig
