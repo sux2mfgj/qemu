@@ -55,7 +55,6 @@ extern bool pci_available;
 #define PCI_VENDOR_ID_QEMU               0x1234
 #define PCI_DEVICE_ID_QEMU_VGA           0x1111
 #define PCI_DEVICE_ID_QEMU_IPMI          0x1112
-#define PCI_DEVICE_ID_QEMU_PCIEC         0x1113
 
 /* VMWare (0x15ad) */
 #define PCI_VENDOR_ID_VMWARE             0x15ad
@@ -115,6 +114,7 @@ extern bool pci_available;
 #define PCI_DEVICE_ID_REDHAT_NVME        0x0010
 #define PCI_DEVICE_ID_REDHAT_PVPANIC     0x0011
 #define PCI_DEVICE_ID_REDHAT_ACPI_ERST   0x0012
+#define PCI_DEVICE_ID_REDHAT_PCIE_EP     0x0013
 #define PCI_DEVICE_ID_REDHAT_QXL         0x0100
 
 #define FMT_PCIBUS                      PRIx64
