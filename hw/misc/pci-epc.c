@@ -2,11 +2,11 @@
  * QEMU PCI endpoint controller device
  */
 
+#include "qemu/osdep.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_regs.h"
 #include "hw/sysbus.h"
-#include "qemu/osdep.h"
 
 #define TYPE_PCI_EPC "pci-epc"
 
@@ -17,7 +17,7 @@ typedef struct PCIEPCState {
 
     MemoryRegion mmio;
 
-    u8 config_space[PCI_CFG_SPACE_SIZE];
+    uint8_t config_space[PCI_CFG_SPACE_SIZE];
 
 } PCIEPCState;
 
@@ -38,7 +38,7 @@ static void pciepc_mmio_write(void* opaque,
     if (addr + size >= PCI_CFG_SPACE_SIZE)
         return;
 
-    memcpy(state->config_space, &val, size);
+    memcpy(&state->config_space[addr], &val, size);
 }
 
 static const MemoryRegionOps pciepc_mmio_ops = {
@@ -52,7 +52,7 @@ static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
     PCIEPCState* state = PCI_EPC(pci_dev);
 
     memory_region_init_io(&state->mmio, OBJECT(state), &pciepc_mmio_ops, state,
-                          "pci-epc", 16);
+                          "pci-epc", PCI_CONFIG_SPACE_SIZE);
 
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->mmio);
 }
