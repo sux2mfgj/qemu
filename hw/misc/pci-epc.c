@@ -37,6 +37,7 @@
  * u64 phys_addr
  */
 
+#define QEMU_PCI_EPC_VER 0x00
 enum {
     // for pci configration space
     REG_OFFSET_VENDOR_ID = 0x0,
@@ -205,7 +206,7 @@ static void pci_epc_class_init(ObjectClass* obj, void* data)
     pcidev->realize = pci_epc_realize;
     pcidev->vendor_id = PCI_VENDOR_ID_REDHAT;
     pcidev->device_id = PCI_DEVICE_ID_REDHAT_PCIE_EP;
-    pcidev->revision = 0x00;
+    pcidev->revision = QEMU_PCI_EPC_VER;
     pcidev->class_id = PCI_CLASS_OTHERS;
 
     qemu_log("%s:%d\n", __func__, __LINE__);
