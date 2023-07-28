@@ -7,6 +7,7 @@
 #include "qapi/error.h"
 #include "qom/object.h"
 #include "hw/pci/pci_device.h"
+#include "hw/pci/msi.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -36,15 +37,50 @@ static void epc_bridge_dev_class_init (ObjectClass *klass, void *data)
 }
 #endif
 
-
 static uint64_t epc_bridge_bar0_read(void *opaque, hwaddr addr, unsigned size)
 {
+    qemu_log("%s addr 0x%lx, size 0x%x\n", __func__, addr, size);
+
+#define PCI_ENDPOINT_TEST_STATUS		0x8
+
+    switch(addr){ 
+        case PCI_ENDPOINT_TEST_STATUS:
+            return 1 << 6;
+        default:
+            qemu_log("unknown command 0x%lx\n", addr);
+    }
+
     return 0;
 }
 
 static void epc_bridge_bar0_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
+    EPCBridgeDevState *s = opaque;
+    PCIDevice *dev = PCI_DEVICE(s);
 
+    qemu_log("%s addr 0x%lx, val 0x%lx, size 0x%x\n", __func__, addr, val, size);
+
+#define PCI_ENDPOINT_TEST_COMMAND 0x4
+
+#define COMMAND_READ (1 << 3)
+#define COMMAND_WRITE (1 << 4)
+#define COMMAND_COPY (1 << 5)
+    if (addr == PCI_ENDPOINT_TEST_COMMAND) {
+        switch(val) {
+            case COMMAND_WRITE:
+                if (!msi_enabled(dev)) {
+                    qemu_log("failed to send msi\n");
+                    return;
+                }
+                msi_notify(dev, 0);
+                break;
+            case COMMAND_READ:
+            case COMMAND_COPY:
+            default:
+                qemu_log("not support command: %ld\n", val);
+                break;
+        }
+    }
 }
 
 static const MemoryRegionOps epc_bridge_mmio_ops = {
@@ -69,14 +105,15 @@ static void epc_bridge_realize(PCIDevice *pci_dev, Error ** errp)
     EPCBridgeDevState *d = EPC_BRIDGE(pci_dev);
 
     epc_bridge_dev_setup_bar(d, pci_dev, errp);
+    msi_init(pci_dev, 0x50, 1, true, true, NULL);
 }
 
 static int epc_bridge_dev_load_pci_configs(EPCBridgeDevState *dev, PCIDeviceClass *pci)
 {
     //TODO should be access epc device
 
-    pci->vendor_id = PCI_VENDOR_ID_REDHAT;
-    pci->vendor_id = PCI_DEVICE_ID_REDHAT_TEST;
+    pci->vendor_id = PCI_VENDOR_ID_TI;
+    pci->device_id = 0xb500;
     pci->revision = 0x00;
     pci->class_id = PCI_CLASS_OTHERS;
 
