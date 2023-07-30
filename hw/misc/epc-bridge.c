@@ -43,7 +43,7 @@ static uint64_t epc_bridge_bar0_read(void *opaque, hwaddr addr, unsigned size)
 
 #define PCI_ENDPOINT_TEST_STATUS		0x8
 
-    switch(addr){ 
+    switch(addr){
         case PCI_ENDPOINT_TEST_STATUS:
             return 1 << 6;
         default:
