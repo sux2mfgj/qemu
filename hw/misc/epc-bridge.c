@@ -4,10 +4,12 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/guest-random.h"
 #include "qapi/error.h"
 #include "qom/object.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/msi.h"
+#include <zlib.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -23,11 +25,35 @@ struct EPCBridgeDevState {
     MemoryRegion space;
 
     int epfd;
+    struct {
+        uint64_t addr;
+        size_t size;
+        uint32_t checksum;
+#define STATUS_READ_SUCCESS			BIT(0)
+#define STATUS_READ_FAIL			BIT(1)
+#define STATUS_WRITE_SUCCESS			BIT(2)
+#define STATUS_WRITE_FAIL			BIT(3)
+#define STATUS_COPY_SUCCESS			BIT(4)
+#define STATUS_COPY_FAIL			BIT(5)
+#define STATUS_IRQ_RAISED			BIT(6)
+#define STATUS_SRC_ADDR_INVALID			BIT(7)
+#define STATUS_DST_ADDR_INVALID			BIT(8)
+        uint32_t status;
+    } test;
 };
 
 #define TYPE_EPC_BRIDGE "epc-bridge"
 OBJECT_DECLARE_SIMPLE_TYPE(EPCBridgeDevState, EPC_BRIDGE)
 
+#define PCI_ENDPOINT_TEST_COMMAND 0x4
+#define PCI_ENDPOINT_TEST_STATUS 0x8
+#define PCI_ENDPOINT_TEST_LOWER_DST_ADDR 0x14
+#define PCI_ENDPOINT_TEST_UPPER_DST_ADDR 0x18
+#define PCI_ENDPOINT_TEST_SIZE 0x1c
+#define PCI_ENDPOINT_TEST_CHECKSUM 0x20
+#define PCI_ENDPOINT_TEST_IRQ_TYPE 0x24
+#define PCI_ENDPOINT_TEST_IRQ_NUMBER 0x28
+#define PCI_ENDPOINT_TEST_FLAGS 0x2c
 
 #if 0
 static void epc_bridge_dev_class_init (ObjectClass *klass, void *data)
@@ -39,18 +65,52 @@ static void epc_bridge_dev_class_init (ObjectClass *klass, void *data)
 
 static uint64_t epc_bridge_bar0_read(void *opaque, hwaddr addr, unsigned size)
 {
+    EPCBridgeDevState *s = opaque;
+
     qemu_log("%s addr 0x%lx, size 0x%x\n", __func__, addr, size);
 
-#define PCI_ENDPOINT_TEST_STATUS		0x8
-
-    switch(addr){
+    switch(addr) {
         case PCI_ENDPOINT_TEST_STATUS:
-            return 1 << 6;
+            qemu_log("read test status 0x%d\n", s->test.status);
+            return s->test.status;
+        case PCI_ENDPOINT_TEST_CHECKSUM:
+            qemu_log("read checksum 0x%x\n", s->test.checksum);
+            return s->test.checksum;
         default:
-            qemu_log("unknown command 0x%lx\n", addr);
+            qemu_log("found no handled read access: addr 0x%lx\n", addr);
     }
 
     return 0;
+}
+
+static void epc_bridge_handle_test_write_cmd(EPCBridgeDevState *s, PCIDevice *dev)
+{
+    int *data = malloc(s->test.size);
+
+    qemu_log("%s\n", __func__);
+
+    qemu_guest_getrandom(data, s->test.size, NULL);
+
+    pci_dma_write(dev, s->test.addr, data, s->test.size);
+
+    {
+        uint32_t *b = (uint32_t*)data;
+        for(int i=0; i<1; i++)
+            qemu_log("%02x: 0x%x\n", i * 4, b[i]);
+    }
+
+    s->test.checksum = crc32(0x0, (uint8_t*)data, s->test.size) ^ 0xffffffff;
+    qemu_log("checksum 0x%x\n", s->test.checksum);
+
+    free(data);
+
+    if (!msi_enabled(dev)) {
+        qemu_log("failed to send msi\n");
+        return;
+    }
+
+    s->test.status = STATUS_IRQ_RAISED;
+    msi_notify(dev, 0);
 }
 
 static void epc_bridge_bar0_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
@@ -60,19 +120,15 @@ static void epc_bridge_bar0_write(void *opaque, hwaddr addr, uint64_t val, unsig
 
     qemu_log("%s addr 0x%lx, val 0x%lx, size 0x%x\n", __func__, addr, val, size);
 
-#define PCI_ENDPOINT_TEST_COMMAND 0x4
 
 #define COMMAND_READ (1 << 3)
 #define COMMAND_WRITE (1 << 4)
 #define COMMAND_COPY (1 << 5)
-    if (addr == PCI_ENDPOINT_TEST_COMMAND) {
+    switch (addr) {
+    case PCI_ENDPOINT_TEST_COMMAND:
         switch(val) {
             case COMMAND_WRITE:
-                if (!msi_enabled(dev)) {
-                    qemu_log("failed to send msi\n");
-                    return;
-                }
-                msi_notify(dev, 0);
+                epc_bridge_handle_test_write_cmd(s, dev);
                 break;
             case COMMAND_READ:
             case COMMAND_COPY:
@@ -80,6 +136,43 @@ static void epc_bridge_bar0_write(void *opaque, hwaddr addr, uint64_t val, unsig
                 qemu_log("not support command: %ld\n", val);
                 break;
         }
+        break;
+    case PCI_ENDPOINT_TEST_LOWER_DST_ADDR:
+    {
+        uint64_t taddr =  (s->test.addr & 0xffffffff00000000) | (uint32_t)val;
+        s->test.addr = taddr;
+        break;
+    }
+    case PCI_ENDPOINT_TEST_UPPER_DST_ADDR:
+    {
+        s->test.addr = (val << 32) | (s->test.addr & 0xffffffff);
+        qemu_log("set addr 0x%lx\n", s->test.addr);
+        break;
+    }
+    case PCI_ENDPOINT_TEST_SIZE:
+    {
+        s->test.size = val;
+        qemu_log("size 0x%x\n", (uint32_t)val);
+        break;
+    }
+    case PCI_ENDPOINT_TEST_STATUS:
+    {
+        s->test.status = (uint32_t)val;
+        qemu_log("set status 0x%x\n", (uint32_t)val);
+        break;
+    }
+    case PCI_ENDPOINT_TEST_IRQ_TYPE:
+    {
+        qemu_log("set irq type 0x%x\n", (uint32_t)val);
+        break;
+    }
+    case PCI_ENDPOINT_TEST_IRQ_NUMBER:
+    {
+        qemu_log("set irq number %d\n", (uint32_t)val);
+        break;
+    }
+    default:
+        qemu_log("found no handled write access: addr 0x%lx, val 0x%lx\n", addr, val);
     }
 }
 
@@ -91,7 +184,7 @@ static const MemoryRegionOps epc_bridge_mmio_ops = {
 
 static int epc_bridge_dev_setup_bar(EPCBridgeDevState *d, PCIDevice *pci_dev, Error ** errp)
 {
-    memory_region_init_io(&d->space, OBJECT(d), &epc_bridge_mmio_ops, d, TYPE_EPC_BRIDGE"/bar0", 32);
+    memory_region_init_io(&d->space, OBJECT(d), &epc_bridge_mmio_ops, d, TYPE_EPC_BRIDGE"/bar0", 0x40);
 
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &d->space);
 
