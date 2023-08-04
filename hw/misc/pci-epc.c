@@ -4,9 +4,11 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/thread.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_regs.h"
+#include "qemu-epc.h"
 
 #define TYPE_PCI_EPC "pci-epc"
 
@@ -37,7 +39,6 @@
  * u64 phys_addr
  */
 
-#define QEMU_PCI_EPC_VER 0x00
 enum {
     // for pci configration space
     REG_OFFSET_VENDOR_ID = 0x0,
@@ -73,6 +74,10 @@ typedef struct PCIEPCState {
     PCIDevice parent_obj;
     /*< public >*/
 
+    QemuThread srv_thread;
+    int srv_fd, clt_fd;
+    int start;
+
     MemoryRegion ctrl, cfg;
 
     uint8_t config_space[0x10];
@@ -96,6 +101,16 @@ static void pciepc_mmio_ctl_write(void* opaque,
                               uint64_t val,
                               unsigned size)
 {
+    PCIEPCState* state = opaque;
+
+    switch(addr) {
+        case 0:
+        if (state->start == 0 && val == 1) {
+            qemu_log("start epc");
+        } else if (state->start == 1 && val == 0) {
+            qemu_log("stop epc");
+        }
+    }
     qemu_log("%s:%d\n", __func__, __LINE__);
 }
 
@@ -185,10 +200,114 @@ static const MemoryRegionOps pciepc_mmio_cfg_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static int qepc_handle_msg_version(PCIEPCState *state)
+{
+    uint32_t version = QPCI_EPC_VER;
+    ssize_t size; 
+
+    qemu_log("server version is %d\n", version);
+
+    size = send(state->clt_fd, &version, sizeof (version), 0);
+    if (size != sizeof(version))
+        return -1;
+
+    return 0;
+}
+
+static int qepc_handle_msg_pci_hdr(PCIEPCState *state)
+{
+    ssize_t size;
+    struct qepc_msg_pci_hdr_payload hdr;
+
+    hdr.vendor_id = *(uint16_t*)&state->config_space[REG_OFFSET_VENDOR_ID];
+    hdr.device_id = *(uint16_t*)&state->config_space[REG_OFFSET_DEVICE_ID];
+    hdr.revision = *(uint8_t *)&state->config_space[REG_OFFSET_REVISON_ID];
+    hdr.class_id = *(uint16_t *)&state->config_space[REG_OFFSET_CLASS_CODE];
+
+    size = send(state->clt_fd, &hdr, sizeof (hdr), 0);
+    if (size != sizeof(hdr))
+        return -1;
+
+    return 0;
+}
+
+static void *pci_epc_src_thread(void *opaque)
+{
+    PCIEPCState *state = opaque;
+    struct sockaddr_un sun;
+    int ret;
+    socklen_t socklen;
+
+    state->srv_fd  = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (state->srv_fd< 0)
+        return NULL;
+
+    sun.sun_family = AF_UNIX;
+    strcpy(sun.sun_path, QEMU_EPC_SOCK_PATH);
+
+    ret = bind(state->srv_fd, (const struct sockaddr *)&sun, sizeof(sun));
+    if (ret == -1)
+        return NULL;
+
+    ret = listen(state->srv_fd, 1);
+    if (ret == -1)
+        return NULL;
+
+    qemu_log("start server: %s", QEMU_EPC_SOCK_PATH);
+
+    socklen = sizeof(sun);
+
+    state->clt_fd = accept(state->srv_fd, (struct sockaddr *)&sun, &socklen);
+    if (state->clt_fd == -1)
+        return NULL;
+
+    dbg;
+
+    while(1) {
+        ssize_t size;
+        uint8_t type;
+
+        dbg;
+        qemu_log("%s:%d\n", __func__, __LINE__);
+        size = recv(state->clt_fd, &type, sizeof(type), 0);
+        if (size < 1) {
+            if (errno == EAGAIN)
+                continue;
+        }
+        if (size != sizeof(type)) {
+            qemu_log("failed to get message type: %ld != %ld\n", size, sizeof(type));
+            goto done; 
+        }
+        dbg;
+
+        switch(type) {
+            case QEPC_MSG_TYPE_VER:
+                qemu_log("client requests server version\n");
+                ret = qepc_handle_msg_version(state);
+                if (ret)
+                    goto done;
+                break;
+            case QEPC_MSG_TYPE_PCI_HDR:
+                ret = qepc_handle_msg_pci_hdr(state);
+                if (ret)
+                    goto done;
+                break;
+            default:
+                qemu_log("found invalid message type: %d\n", type);
+                goto done;
+        }
+    }
+    qemu_log("%s:%d\n", __func__, __LINE__);
+
+done:
+    return NULL;
+}
+
 static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
 {
     PCIEPCState* state = PCI_EPC(pci_dev);
 
+    qemu_log("%s:%d\n", __func__, __LINE__);
     memory_region_init_io(&state->ctrl, OBJECT(state), &pciepc_mmio_ctl_ops, state,
             "pci-epf/ctl", 64);
     memory_region_init_io(&state->cfg, OBJECT(state), &pciepc_mmio_cfg_ops, state,
@@ -196,6 +315,9 @@ static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
 
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->cfg);
     pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->ctrl);
+
+    qemu_log("%s:%d\n", __func__, __LINE__);
+    qemu_thread_create(&state->srv_thread, "qemu-epc", pci_epc_src_thread, state, QEMU_THREAD_JOINABLE);
 }
 
 static void pci_epc_class_init(ObjectClass* obj, void* data)
@@ -206,7 +328,7 @@ static void pci_epc_class_init(ObjectClass* obj, void* data)
     pcidev->realize = pci_epc_realize;
     pcidev->vendor_id = PCI_VENDOR_ID_REDHAT;
     pcidev->device_id = PCI_DEVICE_ID_REDHAT_PCIE_EP;
-    pcidev->revision = QEMU_PCI_EPC_VER;
+    pcidev->revision = QPCI_EPC_VER;
     pcidev->class_id = PCI_CLASS_OTHERS;
 
     qemu_log("%s:%d\n", __func__, __LINE__);

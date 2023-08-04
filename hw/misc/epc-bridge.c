@@ -8,6 +8,7 @@
 #include "qom/object.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/msi.h"
+#include "qemu-epc.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -104,10 +105,14 @@ static void epc_bridge_realize(PCIDevice *pci_dev, Error ** errp)
 {
     EPCBridgeDevState *d = EPC_BRIDGE(pci_dev);
 
+    dbg;
     epc_bridge_dev_setup_bar(d, pci_dev, errp);
+    dbg;
     msi_init(pci_dev, 0x50, 1, true, true, NULL);
+    dbg;
 }
 
+#if 0
 static int epc_bridge_dev_load_pci_configs(EPCBridgeDevState *dev, PCIDeviceClass *pci)
 {
     //TODO should be access epc device
@@ -119,6 +124,7 @@ static int epc_bridge_dev_load_pci_configs(EPCBridgeDevState *dev, PCIDeviceClas
 
     return 0;
 }
+#endif
 
 #if 0
 static void dummy() {
@@ -145,12 +151,115 @@ struct sockaddr_un saddr;
 }
 #endif
 
+static int epc_bridge_connect_srv(EPCBridgeDevState *d)
+{
+    struct sockaddr_un sockaddr = {};
+    int err;
+
+    dbg;
+    d->epfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (d->epfd == -1)
+        return -1;
+
+    dbg;
+
+    sockaddr.sun_family = AF_UNIX;
+    strcpy(sockaddr.sun_path, QEMU_EPC_SOCK_PATH);
+
+    dbg;
+    err = connect(d->epfd, (struct sockaddr*)&sockaddr, sizeof(sockaddr));
+    if (err == -1)
+        return -1;
+
+    qemu_log("connected to server %s\n", QEMU_EPC_SOCK_PATH);
+
+    return 0;
+}
+
+static int qepc_get_srv_version(int fd, uint32_t *ver)
+{
+    ssize_t size;
+    uint8_t type = QEPC_MSG_TYPE_VER;
+
+    size = send(fd, &type, sizeof(type), 0);
+    if (size != sizeof(type))
+        return -1;
+
+    size = recv(fd, ver, sizeof(*ver), 0);
+    if (size != sizeof(*ver))
+        return -1;
+
+    return 0;
+}
+
+static int qepc_load_pci_hdr(int fd, PCIDeviceClass *k)
+{
+#if 0
+    ssize_t size;
+    uint8_t type = QEPC_MSG_TYPE_PCI_HDR;
+    struct qepc_msg_pci_hdr_payload hdr;
+
+    dbg;
+    size = send(fd, &type, sizeof(type), 0);
+    if (size != sizeof(type))
+        return -1;
+
+    dbg;
+    size = recv(fd, &hdr, sizeof(hdr), 0);
+    if (size != sizeof(hdr))
+        return -1;
+
+    dbg;
+    k->vendor_id = hdr.vendor_id;
+    k->device_id = hdr.device_id;
+    k->revision = hdr.revision;
+    k->class_id = hdr.class_id;
+
+    dbg;
+
+#else
+    k->vendor_id = PCI_VENDOR_ID_TI;
+    k->device_id = 0xb500;
+    k->revision = 0x00;
+    k->class_id = PCI_CLASS_OTHERS;
+#endif
+
+    return 0;
+}
+
 static void epc_bridge_dev_instance_init(Object *obj)
 {
     EPCBridgeDevState *d = EPC_BRIDGE(obj);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(obj->class);
+    int err;
+    uint32_t version;
 
-    epc_bridge_dev_load_pci_configs(d, k);
+    err = epc_bridge_connect_srv(d);
+    if (err) {
+        qemu_log("failed to connect server\n");
+        return;
+    }
+
+    dbg;
+    err = qepc_get_srv_version(d->epfd, &version);
+    if (err) {
+        qemu_log("failed to get server version\n");
+        return;
+    }
+    dbg;
+
+    if (version != QPCI_EPC_VER) {
+        qemu_log("found invalid version is expected %d, but %d\n", QPCI_EPC_VER, version);
+        return;
+    }
+
+    err = qepc_load_pci_hdr(d->epfd, k);
+    if (err) {
+        qemu_log("failed to load pci header\n");
+        return;
+    }
+
+    dbg;
 
     k->realize = epc_bridge_realize;
 }
