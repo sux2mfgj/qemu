@@ -14,10 +14,6 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 
-typedef struct EPCBridgeDevHdr {
-
-} EPCBridgeDevHdr;
-
 struct EPCBridgeDevState {
     /*< private >*/
     PCIDevice parent_obj;
@@ -251,7 +247,7 @@ static void epc_bridge_dev_instance_init(Object *obj)
 static const TypeInfo epc_bridge_dev_info = {
     .name = TYPE_EPC_BRIDGE,
     .parent        = TYPE_PCI_DEVICE,
-    .instance_size = sizeof(EPCBridgeDevHdr),
+    .instance_size = sizeof(EPCBridgeDevState),
 //     .class_init    = epc_bridge_dev_class_init,
     .instance_init = epc_bridge_dev_instance_init,
     .interfaces = (InterfaceInfo[]){
