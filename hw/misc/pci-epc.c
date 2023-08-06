@@ -4,9 +4,12 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/thread.h"
 #include "hw/pci/pci.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/pci_regs.h"
+
+#include "qemu-epc.h"
 
 #define TYPE_PCI_EPC "pci-epc"
 
@@ -72,6 +75,9 @@ typedef struct PCIEPCState {
     /*< private >*/
     PCIDevice parent_obj;
     /*< public >*/
+
+    QemuThread srv_thread;
+    int srv_fd, clt_fd;
 
     MemoryRegion ctrl, cfg;
 
@@ -185,6 +191,84 @@ static const MemoryRegionOps pciepc_mmio_cfg_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static int qemu_epc_handle_msg_ver(PCIEPCState *state)
+{
+    ssize_t size;
+    qemu_epc_msg_version_t version = QEMU_EPC_PROTOCOL_VERSION;
+
+    size = send(state->clt_fd, &version, sizeof(version), 0);
+    if (size != sizeof(version)) {
+        qemu_log("failed to send message\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+static void *pci_epc_srv_thread(void *opaque)
+{
+    PCIEPCState* state = opaque;
+    int err;
+    struct sockaddr_un sun;
+    socklen_t socklen;
+
+    state->srv_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (state->srv_fd < 0) {
+        qemu_log("failed to allocate socket\n");
+        return NULL;
+    }
+
+    sun.sun_family = AF_UNIX;
+    strcpy(sun.sun_path, QEMU_EPC_SOCK_PATH);
+
+    err = bind(state->srv_fd, (const struct sockaddr*)&sun, sizeof(sun));
+    if (err == -1) {
+        qemu_log("failed to bind\n");
+        return NULL;
+    }
+
+    err = listen(state->srv_fd, 1);
+    if (err == -1) {
+        qemu_log("failed to listen\n");
+        return NULL;
+    }
+
+    socklen = sizeof(sun);
+
+    state->clt_fd = accept(state->srv_fd, (struct sockaddr *)&sun, &socklen);
+    if (state->clt_fd == -1) {
+        qemu_log("failed to accept\n");
+        return NULL;
+    }
+
+    while(1) {
+        uint8_t type;
+        ssize_t size;
+
+        size = recv(state->clt_fd, &type, sizeof(type), 0);
+        if (size != sizeof(type)) {
+            qemu_log("failed recv: %ld\n", size);
+            return NULL;
+        }
+
+        qemu_log("%d type message handling...\n", type);
+
+        switch(type) {
+            case QEMU_EPC_MSG_TYPE_VER:
+                err = qemu_epc_handle_msg_ver(state);
+                if (err) {
+                    qemu_log("failed to handle VER message\n");
+                }
+                break;
+            default:
+                qemu_log("found unknown message type: %d\n", type);
+                return NULL;
+        }
+    }
+
+    return NULL;
+}
+
 static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
 {
     PCIEPCState* state = PCI_EPC(pci_dev);
@@ -196,6 +280,8 @@ static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
 
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->cfg);
     pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->ctrl);
+
+    qemu_thread_create(&state->srv_thread, "qemu-epc", pci_epc_srv_thread, state, QEMU_THREAD_JOINABLE);
 }
 
 static void pci_epc_class_init(ObjectClass* obj, void* data)
