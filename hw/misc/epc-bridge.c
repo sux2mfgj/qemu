@@ -4,12 +4,15 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/thread.h"
 #include "qemu/guest-random.h"
 #include "qapi/error.h"
 #include "qom/object.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/msi.h"
 #include <zlib.h>
+
+#include "qemu-epc.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -19,6 +22,8 @@ struct EPCBridgeDevState {
     PCIDevice parent_obj;
     /*< public >*/
     MemoryRegion space;
+
+    QemuThread recv_thread;
 
     int epfd;
     struct {
@@ -189,9 +194,73 @@ static int epc_bridge_dev_setup_bar(EPCBridgeDevState *d, PCIDevice *pci_dev, Er
     return 0;
 }
 
+static int epc_bridge_check_protocol_version(EPCBridgeDevState *d)
+{
+    ssize_t size;
+    uint8_t type = QEMU_EPC_MSG_TYPE_VER;
+    qemu_epc_msg_version_t version;
+
+    size = send(d->epfd, &type, sizeof(type), 0);
+    if (size != sizeof(type)) {
+        qemu_log("failed the send\n");
+        return -1;
+    }
+
+    size = recv(d->epfd, &version, sizeof(version), 0);
+    if (size != sizeof(version)) {
+        qemu_log("failed to receive enough data size\n");
+        return -1;
+    }
+
+    if (version != QEMU_EPC_PROTOCOL_VERSION) {
+        qemu_log("found invalid protocol verison. 0x%x is expected but found 0x%d\n", QEMU_EPC_PROTOCOL_VERSION, version);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int epc_bridge_connect_server(EPCBridgeDevState *d, Error ** errp)
+{
+    int err;
+    struct sockaddr_un sun = {};
+
+    d->epfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (d->epfd == -1) {
+        error_setg(errp, "failed to create socket");
+        return -1;
+    }
+
+    sun.sun_family = AF_UNIX;
+    strcpy(sun.sun_path, QEMU_EPC_SOCK_PATH);
+
+    err = connect(d->epfd, (const struct sockaddr *)&sun, sizeof(sun));
+    if (err == -1) {
+        error_setg(errp, "failed to connect server\n");
+        return -1;
+    }
+
+    err = epc_bridge_check_protocol_version(d);
+    if (err) {
+        error_setg(errp, "invalid server version\n");
+        return err;
+    }
+
+    return 0;
+}
+
 static void epc_bridge_realize(PCIDevice *pci_dev, Error ** errp)
 {
     EPCBridgeDevState *d = EPC_BRIDGE(pci_dev);
+    int err;
+
+    err = epc_bridge_connect_server(d, errp);
+    if (err) {
+        qemu_log("failed to connect server\n");
+        return;
+    }
+
+    qemu_log("connected to server\n");
 
     epc_bridge_dev_setup_bar(d, pci_dev, errp);
     msi_init(pci_dev, 0x50, 1, true, true, NULL);
@@ -208,31 +277,6 @@ static int epc_bridge_dev_load_pci_configs(EPCBridgeDevState *dev, PCIDeviceClas
 
     return 0;
 }
-
-#if 0
-static void dummy() {
-struct sockaddr_un saddr;
-    char buf[32];
-
-    d->epfd = socket(AF_UNIX, SOCK_STREAM, 0);
-    assert(d->epfd > 0);
-
-    memset(&saddr, 0x00, sizeof(saddr));
-    saddr.sun_family = AF_UNIX;
-    strcpy(saddr.sun_path, "/tmp/qemu-epc-bridge.sock");
-    err = connect(d->epfd, (const struct sockaddr *)&saddr, sizeof(saddr));
-    assert(err == 0);
-
-#define MSG "get vendor"
-    err = send(d->epfd, MSG, sizeof(MSG), 0);
-    assert(err == sizeof (MSG));
-
-    memset(buf, 0x00, 32);
-    err = recv(d->epfd, buf, 32, 0);
-    qemu_log("recv %s\n", buf);
-
-}
-#endif
 
 static void epc_bridge_dev_instance_init(Object *obj)
 {
