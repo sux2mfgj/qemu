@@ -56,13 +56,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(EPCBridgeDevState, EPC_BRIDGE)
 #define PCI_ENDPOINT_TEST_IRQ_NUMBER 0x28
 #define PCI_ENDPOINT_TEST_FLAGS 0x2c
 
-#if 0
-static void epc_bridge_dev_class_init (ObjectClass *klass, void *data)
-{
-//     DeviceClass *dc = DEVICE_CLASS(klass);
-//     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
-}
-#endif
+
 
 static uint64_t epc_bridge_bar0_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -262,28 +256,23 @@ static void epc_bridge_realize(PCIDevice *pci_dev, Error ** errp)
 
     qemu_log("connected to server\n");
 
+    pci_config_set_vendor_id(pci_dev->config, PCI_VENDOR_ID_TI);
+    pci_config_set_device_id(pci_dev->config, 0xb500);
+    pci_config_set_revision(pci_dev->config, 0x00);
+    pci_config_set_class(pci_dev->config, PCI_CLASS_OTHERS);
+
+
     epc_bridge_dev_setup_bar(d, pci_dev, errp);
     msi_init(pci_dev, 0x50, 1, true, true, NULL);
 }
 
-static int epc_bridge_dev_load_pci_configs(EPCBridgeDevState *dev, PCIDeviceClass *pci)
+static void epc_bridge_dev_class_init (ObjectClass *klass, void *data)
 {
-    //TODO should be access epc device
+    DeviceClass *dc = DEVICE_CLASS(klass);
+    PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    pci->vendor_id = PCI_VENDOR_ID_TI;
-    pci->device_id = 0xb500;
-    pci->revision = 0x00;
-    pci->class_id = PCI_CLASS_OTHERS;
-
-    return 0;
-}
-
-static void epc_bridge_dev_instance_init(Object *obj)
-{
-    EPCBridgeDevState *d = EPC_BRIDGE(obj);
-    PCIDeviceClass *k = PCI_DEVICE_CLASS(obj->class);
-
-    epc_bridge_dev_load_pci_configs(d, k);
+    dc->desc = "PCI EP function bridge device";
+    set_bit(DEVICE_CATEGORY_MISC, dc->categories);
 
     k->realize = epc_bridge_realize;
 }
@@ -292,8 +281,7 @@ static const TypeInfo epc_bridge_dev_info = {
     .name = TYPE_EPC_BRIDGE,
     .parent        = TYPE_PCI_DEVICE,
     .instance_size = sizeof(EPCBridgeDevState),
-//     .class_init    = epc_bridge_dev_class_init,
-    .instance_init = epc_bridge_dev_instance_init,
+    .class_init    = epc_bridge_dev_class_init,
     .interfaces = (InterfaceInfo[]){
         {INTERFACE_PCIE_DEVICE},
         {},
