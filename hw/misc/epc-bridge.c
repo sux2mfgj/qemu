@@ -191,8 +191,8 @@ static int epc_bridge_dev_setup_bar(EPCBridgeDevState *d, PCIDevice *pci_dev, Er
 static int epc_bridge_check_protocol_version(EPCBridgeDevState *d)
 {
     ssize_t size;
-    uint8_t type = QEMU_EPC_MSG_TYPE_VER;
-    qemu_epc_msg_version_t version;
+    uint32_t type = QEMU_EPC_MSG_TYPE_VER;
+    uint32_t version;
 
     size = send(d->epfd, &type, sizeof(type), 0);
     if (size != sizeof(type)) {
@@ -243,6 +243,75 @@ static int epc_bridge_connect_server(EPCBridgeDevState *d, Error ** errp)
     return 0;
 }
 
+static int epc_bridge_req_pci_config(EPCBridgeDevState *d, uint32_t offset, uint32_t size, void *buf)
+{
+    ssize_t tsize;
+    uint32_t type = QEMU_EPC_MSG_TYPE_HDR;
+    struct qemu_epc_req_pci_config req = {
+        .offset = offset,
+        .size = size,
+    };
+
+    tsize = send(d->epfd, &type, sizeof(type), 0);
+    if (tsize != sizeof(type)) {
+        qemu_log("failed to send type\n");
+        return -1;
+    }
+
+    tsize = send(d->epfd, &req, sizeof(req), 0);
+    if (tsize != sizeof(req)) {
+        qemu_log("failed to send request\n");
+        return -1;
+    }
+
+    tsize = recv(d->epfd, buf, size, 0);
+    if (tsize != size) {
+        qemu_log("failed to receive data");
+        return -1;
+    }
+
+    return 0;
+}
+
+static int epc_bridge_load_pci_config_hdr(PCIDevice *pci_dev, Error ** errp)
+{
+    uint16_t vendor_id, device_id;
+    uint8_t revision, class_id;
+    int err;
+    EPCBridgeDevState *d = EPC_BRIDGE(pci_dev);
+
+    err = epc_bridge_req_pci_config(d, PCI_VENDOR_ID, sizeof(vendor_id), &vendor_id);
+    if (err) {
+        qemu_log("failed to load vendor_id\n");
+        return err;
+    }
+
+    err = epc_bridge_req_pci_config(d, PCI_DEVICE_ID, sizeof(device_id), &device_id);
+    if (err) {
+        qemu_log("failed to load device_id\n");
+        return err;
+    }
+
+    err = epc_bridge_req_pci_config(d, PCI_REVISION_ID, sizeof(revision), &revision);
+    if (err) {
+        qemu_log("failed to load revision\n");
+        return err;
+    }
+
+    err = epc_bridge_req_pci_config(d, PCI_CLASS_DEVICE, sizeof(class_id), &class_id);
+    if (err) {
+        qemu_log("failed to load class\n");
+        return err;
+    }
+
+    pci_config_set_vendor_id(pci_dev->config, vendor_id);
+    pci_config_set_device_id(pci_dev->config, device_id);
+    pci_config_set_revision(pci_dev->config, revision);
+    pci_config_set_class(pci_dev->config, class_id);
+
+    return 0;
+}
+
 static void epc_bridge_realize(PCIDevice *pci_dev, Error ** errp)
 {
     EPCBridgeDevState *d = EPC_BRIDGE(pci_dev);
@@ -256,11 +325,11 @@ static void epc_bridge_realize(PCIDevice *pci_dev, Error ** errp)
 
     qemu_log("connected to server\n");
 
-    pci_config_set_vendor_id(pci_dev->config, PCI_VENDOR_ID_TI);
-    pci_config_set_device_id(pci_dev->config, 0xb500);
-    pci_config_set_revision(pci_dev->config, 0x00);
-    pci_config_set_class(pci_dev->config, PCI_CLASS_OTHERS);
-
+    err = epc_bridge_load_pci_config_hdr(pci_dev, errp);
+    if (err) {
+        qemu_log("failed to setup pci config\n");
+        return;
+    }
 
     epc_bridge_dev_setup_bar(d, pci_dev, errp);
     msi_init(pci_dev, 0x50, 1, true, true, NULL);
