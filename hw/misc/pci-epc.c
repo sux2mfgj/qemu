@@ -205,6 +205,18 @@ static int qemu_epc_handle_msg_ver(PCIEPCState *state)
     return 0;
 }
 
+static int qemu_epc_handle_msg_hdr(PCIEPCState *state)
+{
+    ssize_t size;
+
+    size = send(state->clt_fd, );
+    if (size != ) {
+        return -1;
+    }
+
+    return 0;
+}
+
 static void *pci_epc_srv_thread(void *opaque)
 {
     PCIEPCState* state = opaque;
@@ -259,6 +271,11 @@ static void *pci_epc_srv_thread(void *opaque)
                 if (err) {
                     qemu_log("failed to handle VER message\n");
                 }
+                break;
+            case QEMU_EPC_MSG_TYPE_HDR:
+                err = qemu_epc_handle_msg_hdr(state);
+                if (err)
+                    qemu_log("failed to handle HDR message\n");
                 break;
             default:
                 qemu_log("found unknown message type: %d\n", type);
