@@ -47,14 +47,16 @@ enum {
     REG_OFFSET_IRQ_PIN = 0x10,
 };
 
-struct bar_config_reg {
-    uint8_t mask;
-    uint8_t number;
-    uint8_t flags;
-    uint8_t reserved;
-    uint64_t phys_addr;
-    uint64_t size;
-} __attribute__((packed));
+enum {
+	QEMU_EP_BAR_CFG_OFF_MASK = 0x00,
+	QEMU_EP_BAR_CFG_OFF_NUMBER = 0x01,
+	QEMU_EP_BAR_CFG_OFF_FLAGS = 0x02,
+	QEMU_EP_BAR_CFG_OFF_RSV = 0x04,
+	QEMU_EP_BAR_CFG_OFF_PHYS_ADDR = 0x08,
+	QEMU_EP_BAR_CFG_OFF_SIZE = 0x10,
+
+	QEMU_EP_BAR_CFG_SIZE = 0x18
+};
 
 struct pci_epc_bar {
     uint64_t phys_addr;
@@ -68,6 +70,7 @@ typedef struct PCIEPCState {
     /*< public >*/
 
     QemuThread srv_thread;
+    bool srv_thread_running;
     int srv_fd, clt_fd;
 
     MemoryRegion ctrl, pci_cfg, bar_cfg;
@@ -81,159 +84,6 @@ typedef struct PCIEPCState {
 } PCIEPCState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(PCIEPCState, PCI_EPC);
-
-static uint64_t pciepc_mmio_ctl_read(void *opaque, hwaddr addr, unsigned size)
-{
-    qemu_log("%s:%d\n", __func__, __LINE__);
-    return 0;
-}
-
-static void pciepc_mmio_ctl_write(void* opaque,
-                              hwaddr addr,
-                              uint64_t val,
-                              unsigned size)
-{
-    qemu_log("%s:%d\n", __func__, __LINE__);
-}
-
-static const MemoryRegionOps pciepc_mmio_ctl_ops = {
-    .read = pciepc_mmio_ctl_read,
-    .write = pciepc_mmio_ctl_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
-
-static uint64_t pciepc_mmio_cfg_read(void* opaque, hwaddr addr, unsigned size)
-{
-    return 0;
-}
-
-static void pciepc_mmio_cfg_write(void* opaque,
-                              hwaddr addr,
-                              uint64_t val,
-                              unsigned size)
-{
-    PCIEPCState* state = opaque;
-
-    qemu_log("%s addr %lx, val 0x%lx, size %d\n", __func__, addr, val, size);
-
-    if (addr + size <= PCIE_CONFIG_SPACE_SIZE) {
-        memcpy(&state->config_space[addr], &val, size);
-        return;
-    }
-}
-
-static const MemoryRegionOps pciepc_mmio_pci_cfg_ops = {
-    .read = pciepc_mmio_cfg_read,
-    .write = pciepc_mmio_cfg_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
-
-
-static uint64_t pciepc_mmio_bar_cfg_read(void* opaque, hwaddr addr, unsigned size)
-{
-    PCIEPCState* state = opaque;
-
-    qemu_log("%s addr %lx, size %d\n", __func__, addr, size);
-
-    switch (addr) {
-        case offsetof(struct bar_config_reg, mask):
-            return state->bar_mask;
-        default:
-            return 0;
-    }
-}
-
-static void pciepc_mmio_bar_cfg_write(void* opaque,
-                              hwaddr addr,
-                              uint64_t val,
-                              unsigned size)
-{
-    PCIEPCState* state = opaque;
-
-    qemu_log("%s addr %lx, val 0x%lx, size %d\n", __func__, addr, val, size);
-
-    switch(addr) {
-        case offsetof(struct bar_config_reg, mask):
-            state->bar_mask = (uint8_t)val;
-            size -= 1;
-            val >>= 8;
-            if (size == 0)
-                break;
-            /* fallthrough */
-        case offsetof(struct bar_config_reg, number):
-            state->bar_no = val;
-            size -= 1;
-            val >>= 8;
-            if (size == 0)
-                break;
-            /* fallthrough */
-        case offsetof(struct bar_config_reg, flags):
-            if (state->bar_no > 6)
-                break;
-            state->bars[state->bar_no].flags = val;
-            size -= 1;
-            val >>= 8;
-            if (size == 0)
-                break;
-            /* fallthrough*/
-        case offsetof(struct bar_config_reg, reserved):
-            size -= 1;
-            val >>= 8;
-            if (size == 0)
-                break;
-            /* fallthrough*/
-        case offsetof(struct bar_config_reg, phys_addr):
-            if (state->bar_no > 6)
-                break;
-            if (size == sizeof(uint64_t)) {
-                state->bars[state->bar_no].phys_addr = val;
-                break;
-            }
-            else if (size == sizeof(uint32_t)) {
-                uint64_t tmp = state->bars[state->bar_no].phys_addr & 0xffffffff00000000;
-                state->bars[state->bar_no].phys_addr = tmp | (uint32_t)val;
-            } else {
-                break;
-            }
-        case offsetof(struct bar_config_reg, phys_addr) + sizeof(uint32_t):
-            if (state->bar_no > 6)
-                break;
-            if (size != sizeof(uint32_t))
-                break;
-            state->bars[state->bar_no].phys_addr =
-                (state->bars[state->bar_no].phys_addr & 0xffffffff) | (val << 32);
-            break;
-        case offsetof(struct bar_config_reg, size):
-            if (state->bar_no > 6)
-                break;
-            if (size == sizeof(uint64_t)) {
-                state->bars[state->bar_no].size = val;
-                break;
-            } else if (size == sizeof(uint32_t)) {
-                uint64_t tmp = state->bars[state->bar_no].size & 0xffffffff00000000;
-                state->bars[state->bar_no].size = tmp | (uint32_t)val;
-                break;
-            } else {
-                break;
-            }
-        case offsetof(struct bar_config_reg, size) + sizeof(uint32_t):
-            if (state->bar_no > 6)
-                break;
-            if (size == sizeof(uint32_t)) {
-                uint64_t tmp = state->bars[state->bar_no].size = 0xffffffff;
-                state->bars[state->bar_no].size = tmp | (val << 32);
-            }
-            break;
-        default:
-            break;
-    }
-}
-
-static const MemoryRegionOps pciepc_mmio_bar_cfg_ops = {
-    .read = pciepc_mmio_bar_cfg_read,
-    .write = pciepc_mmio_bar_cfg_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
-};
 
 static int qemu_epc_handle_msg_ver(PCIEPCState *state)
 {
@@ -269,6 +119,52 @@ static int qemu_epc_handle_msg_hdr(PCIEPCState *state)
     if (size != config_req.size) {
         qemu_log("failed to send data\n");
         return -1;
+    }
+
+    return 0;
+}
+
+static int qemu_epc_handle_msg_bar(PCIEPCState *state)
+{
+    uint8_t type;
+    ssize_t size;
+    uint8_t bar_no;
+
+    size = recv(state->clt_fd, &type, sizeof(type), 0);
+    if (size != sizeof(type)) {
+        qemu_log("not enough data size\n");
+        return -1;
+    }
+
+    switch(type) {
+        case QEMU_EPC_REQ_BAR_MASK:
+            size = send(state->clt_fd, &state->bar_mask, sizeof (state->bar_mask), 0);
+            if (size != sizeof(state->bar_mask)) {
+                qemu_log("failed to send all data\n");
+                return -1;
+            }
+            break;
+        case QEMU_EPC_REQ_BAR_BAR:
+            size = recv(state->clt_fd, &bar_no, sizeof(bar_no), 0);
+            if (size != sizeof(bar_no)) {
+                qemu_log("failed to get bar_no");
+                return -1;
+            }
+
+            if (bar_no > 5) {
+                qemu_log("invalid bar_no found\n");
+                return -1;
+            }
+            
+            size = send(state->clt_fd, &state->bars[bar_no].size, sizeof(state->bars[bar_no].size), 0);
+            if (size != sizeof(state->bars[bar_no].size)) {
+                qemu_log("failed to pass bar info\n");
+                return -1;
+            }
+            break;
+        default:
+            qemu_log("invalid bar request type found: %d\n", type);
+            break;
     }
 
     return 0;
@@ -320,7 +216,7 @@ static void *pci_epc_srv_thread(void *opaque)
             return NULL;
         }
 
-        qemu_log("%d type message handling...\n", type);
+        qemu_log("handles %d type message\n", type);
 
         switch(type) {
             case QEMU_EPC_MSG_TYPE_VER:
@@ -334,6 +230,11 @@ static void *pci_epc_srv_thread(void *opaque)
                 if (err)
                     qemu_log("failed to handle HDR message\n");
                 break;
+            case QEMU_EPC_MSG_TYPE_BAR:
+                err = qemu_epc_handle_msg_bar(state);
+                if (err)
+                    qemu_log("failed to handle BAR message\n");
+                break;
             default:
                 qemu_log("found unknown message type: %d\n", type);
                 return NULL;
@@ -342,6 +243,172 @@ static void *pci_epc_srv_thread(void *opaque)
 
     return NULL;
 }
+
+enum {
+    QEMU_EP_CTRL_OFF_START = 0x00,
+};
+
+
+static uint64_t pciepc_mmio_ctl_read(void *opaque, hwaddr addr, unsigned size)
+{
+    qemu_log("%s:%d\n", __func__, __LINE__);
+    return 0;
+}
+
+static void pciepc_mmio_ctl_write(void* opaque,
+                              hwaddr addr,
+                              uint64_t val,
+                              unsigned size)
+{
+    PCIEPCState* state = opaque;
+    qemu_log("%s:%d addr 0x%lx, val 0x%lx\n", __func__, __LINE__, addr, val);
+
+    if (addr == QEMU_EP_CTRL_OFF_START && val == 1 && !state->srv_thread_running) {
+        if (val == 1 && !state->srv_thread_running) {
+            state->srv_thread_running = true;
+            qemu_thread_create(&state->srv_thread, "qemu-epc", pci_epc_srv_thread, state, QEMU_THREAD_JOINABLE);
+        } else if (val == 0 && state->srv_thread_running){
+            //TODO qemu_thread_join();
+            state->srv_thread_running = false;
+        }
+    }
+}
+
+static const MemoryRegionOps pciepc_mmio_ctl_ops = {
+    .read = pciepc_mmio_ctl_read,
+    .write = pciepc_mmio_ctl_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static uint64_t pciepc_mmio_cfg_read(void* opaque, hwaddr addr, unsigned size)
+{
+    return 0;
+}
+
+static void pciepc_mmio_cfg_write(void* opaque,
+                              hwaddr addr,
+                              uint64_t val,
+                              unsigned size)
+{
+    PCIEPCState* state = opaque;
+
+    qemu_log("%s addr %lx, val 0x%lx, size %d\n", __func__, addr, val, size);
+
+    if (addr + size <= PCIE_CONFIG_SPACE_SIZE) {
+        memcpy(&state->config_space[addr], &val, size);
+        return;
+    }
+}
+
+static const MemoryRegionOps pciepc_mmio_pci_cfg_ops = {
+    .read = pciepc_mmio_cfg_read,
+    .write = pciepc_mmio_cfg_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+
+static uint64_t pciepc_mmio_bar_cfg_read(void* opaque, hwaddr addr, unsigned size)
+{
+    PCIEPCState* state = opaque;
+
+    qemu_log("%s addr %lx, size %d\n", __func__, addr, size);
+
+    switch (addr) {
+        case QEMU_EP_BAR_CFG_OFF_MASK:
+            return state->bar_mask;
+        default:
+            return 0;
+    }
+}
+
+static void pciepc_mmio_bar_cfg_write(void* opaque,
+                              hwaddr addr,
+                              uint64_t val,
+                              unsigned size)
+{
+    PCIEPCState* state = opaque;
+
+    qemu_log("%s addr %lx, val 0x%lx, size %d\n", __func__, addr, val, size);
+
+    switch(addr) {
+        case QEMU_EP_BAR_CFG_OFF_MASK:
+            state->bar_mask = (uint8_t)val;
+            size -= 1;
+            val >>= 8;
+            if (size == 0)
+                break;
+            /* fallthrough */
+        case QEMU_EP_BAR_CFG_OFF_NUMBER:
+            state->bar_no = val;
+            size -= 1;
+            val >>= 8;
+            if (size == 0)
+                break;
+            /* fallthrough */
+        case QEMU_EP_BAR_CFG_OFF_FLAGS:
+            if (state->bar_no > 6)
+                break;
+            state->bars[state->bar_no].flags = val;
+            size -= 1;
+            val >>= 8;
+            if (size == 0)
+                break;
+            /* fallthrough*/
+        case QEMU_EP_BAR_CFG_OFF_RSV:
+            size -= 1;
+            val >>= 8;
+            if (size == 0)
+                break;
+            /* fallthrough*/
+        case QEMU_EP_BAR_CFG_OFF_PHYS_ADDR:
+            if (state->bar_no > 6)
+                break;
+            if (size == sizeof(uint64_t)) {
+                state->bars[state->bar_no].phys_addr = val;
+                break;
+            }
+            else if (size == sizeof(uint32_t)) {
+                uint64_t tmp = state->bars[state->bar_no].phys_addr & 0xffffffff00000000;
+                state->bars[state->bar_no].phys_addr = tmp | (uint32_t)val;
+            } else {
+                break;
+            }
+        case QEMU_EP_BAR_CFG_OFF_PHYS_ADDR + 4:
+            if (state->bar_no > 6)
+                break;
+            if (size != sizeof(uint32_t))
+                break;
+            state->bars[state->bar_no].phys_addr =
+                (state->bars[state->bar_no].phys_addr & 0xffffffff) | (val << 32);
+            break;
+        case QEMU_EP_BAR_CFG_OFF_SIZE:
+            if (state->bar_no > 6)
+                break;
+            if (size == sizeof(uint64_t)) {
+                state->bars[state->bar_no].size = val;
+            } else if (size == sizeof(uint32_t)) {
+                uint64_t tmp = state->bars[state->bar_no].size & 0xffffffff00000000;
+                state->bars[state->bar_no].size = tmp | (uint32_t)val;
+            }
+            break;
+        case QEMU_EP_BAR_CFG_OFF_SIZE + 4:
+            if (state->bar_no > 6)
+                break;
+            if (size == sizeof(uint32_t)) {
+                uint64_t tmp = state->bars[state->bar_no].size & 0xffffffff;
+                state->bars[state->bar_no].size = tmp | (val << 32);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+static const MemoryRegionOps pciepc_mmio_bar_cfg_ops = {
+    .read = pciepc_mmio_bar_cfg_read,
+    .write = pciepc_mmio_bar_cfg_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
 
 static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
 {
@@ -352,22 +419,19 @@ static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
     memory_region_init_io(&state->pci_cfg, OBJECT(state), &pciepc_mmio_pci_cfg_ops, state,
                           "pci-epc/pci_cfg", PCIE_CONFIG_SPACE_SIZE);
     memory_region_init_io(&state->bar_cfg, OBJECT(state), &pciepc_mmio_bar_cfg_ops, state,
-                          "pci-epc/bar_cfg", pow2ceil(sizeof(struct bar_config_reg)));
-
+                          "pci-epc/bar_cfg", pow2ceil(QEMU_EP_BAR_CFG_SIZE));
 
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->pci_cfg);
     pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->bar_cfg);
     pci_register_bar(pci_dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->ctrl);
 
-
-    {
+    if (0) {
         //XXX: set dummy data
         pci_config_set_vendor_id(state->config_space, 0x104c);
         pci_config_set_device_id(state->config_space, 0xb500);
         pci_config_set_revision(state->config_space, 0x00);
         pci_config_set_class(state->config_space, PCI_CLASS_OTHERS);
     }
-    qemu_thread_create(&state->srv_thread, "qemu-epc", pci_epc_srv_thread, state, QEMU_THREAD_JOINABLE);
 }
 
 static void pci_epc_class_init(ObjectClass* obj, void* data)
@@ -381,7 +445,6 @@ static void pci_epc_class_init(ObjectClass* obj, void* data)
     pcidev->revision = QEMU_PCI_EPC_VER;
     pcidev->class_id = PCI_CLASS_OTHERS;
 
-    qemu_log("%s:%d\n", __func__, __LINE__);
     dev->desc = "";
     set_bit(DEVICE_CATEGORY_MISC, dev->categories);
     //     dev->reset;
