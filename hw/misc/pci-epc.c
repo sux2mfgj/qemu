@@ -72,6 +72,7 @@ typedef struct PCIEPCState {
     QemuThread srv_thread;
     bool srv_thread_running;
     int srv_fd, clt_fd;
+    int ofd;
 
     MemoryRegion ctrl, pci_cfg, bar_cfg;
 
@@ -95,6 +96,35 @@ static int qemu_epc_handle_msg_ver(PCIEPCState *state)
         qemu_log("failed to send message\n");
         return -1;
     }
+
+    return 0;
+}
+
+static int qemu_epc_handle_msg_fd(PCIEPCState *state)
+{
+    ssize_t size;
+    char buf[512];
+    struct iovec iov = {buf, 512};
+    char cmsg[CMSG_SPACE(sizeof(state->ofd))];
+    struct msghdr msg = {
+        .msg_name = NULL,
+        .msg_namelen = 0,
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = cmsg,
+        .msg_controllen = sizeof(cmsg),
+        .msg_flags = 0
+    };
+    struct cmsghdr *cmsghdr;
+
+    size = recvmsg(state->clt_fd, &msg, 0);
+    if (size < 0) {
+        qemu_log("failed the recvmsg\n");
+        return -1;
+    }
+
+    cmsghdr = CMSG_FIRSTHDR(&msg);
+    state->ofd = *(int*)CMSG_DATA(cmsghdr);
 
     return 0;
 }
@@ -170,6 +200,61 @@ static int qemu_epc_handle_msg_bar(PCIEPCState *state)
     return 0;
 }
 
+static int qemu_epc_handle_access_bar(PCIEPCState *state)
+{
+    ssize_t rsize;
+    struct qemu_epc_access_bar req;
+    PCIDevice *dev = PCI_DEVICE(state);
+    dma_addr_t base;
+    void *buf;
+    MemTxResult result;
+
+    rsize = recv(state->clt_fd, &req, sizeof(req), 0);
+    if (rsize != sizeof(req)) {
+        qemu_log("not enough data\n");
+        return -1;
+    }
+
+    switch(req.type) {
+        case QEMU_EPC_ACCESS_BAR_READ:
+            qemu_log("a read request to bar is not supported yet\n");
+            return -1;
+        case QEMU_EPC_ACCESS_BAR_WRITE:
+            qemu_log("found a write request to bar\n");
+            buf = malloc(req.size);
+            if (!buf) {
+                qemu_log("failed to allocate memory\n");
+                return -1;
+            }
+
+            rsize = recv(state->clt_fd, buf, req.size, 0);
+            if (rsize != req.size) {
+                qemu_log("failed to receve payload\n");
+                return -1;
+            }
+
+            if (req.bar_no > 5) {
+                qemu_log("invalid request");
+                return -1;
+            }
+
+            base = state->bars[req.bar_no].phys_addr + req.offset;
+
+            result = pci_dma_write(dev, base, buf, req.size);
+            if (result) {
+                qemu_log("faield to write data\n");
+                return -result;
+            }
+            free(buf);
+            break;
+        default:
+            qemu_log("invalid access type found\n");
+            break;
+    }
+
+    return 0;
+}
+
 static void *pci_epc_srv_thread(void *opaque)
 {
     PCIEPCState* state = opaque;
@@ -225,6 +310,11 @@ static void *pci_epc_srv_thread(void *opaque)
                     qemu_log("failed to handle VER message\n");
                 }
                 break;
+            case QEMU_EPC_MSG_TYPE_FD:
+                err = qemu_epc_handle_msg_fd(state);
+                if (err)
+                    qemu_log("failed to recv fd\n");
+                break;
             case QEMU_EPC_MSG_TYPE_HDR:
                 err = qemu_epc_handle_msg_hdr(state);
                 if (err)
@@ -234,6 +324,11 @@ static void *pci_epc_srv_thread(void *opaque)
                 err = qemu_epc_handle_msg_bar(state);
                 if (err)
                     qemu_log("failed to handle BAR message\n");
+                break;
+            case QEMU_EPC_MSG_TYPE_ACCESS_BAR:
+                err = qemu_epc_handle_access_bar(state);
+                if (err)
+                    qemu_log("failed to handle accessing bar request\n");
                 break;
             default:
                 qemu_log("found unknown message type: %d\n", type);
@@ -425,13 +520,6 @@ static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
     pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->bar_cfg);
     pci_register_bar(pci_dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->ctrl);
 
-    if (0) {
-        //XXX: set dummy data
-        pci_config_set_vendor_id(state->config_space, 0x104c);
-        pci_config_set_device_id(state->config_space, 0xb500);
-        pci_config_set_revision(state->config_space, 0x00);
-        pci_config_set_class(state->config_space, PCI_CLASS_OTHERS);
-    }
 }
 
 static void pci_epc_class_init(ObjectClass* obj, void* data)
