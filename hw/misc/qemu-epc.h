@@ -8,8 +8,10 @@
 
 enum {
     QEMU_EPC_MSG_TYPE_VER,
+    QEMU_EPC_MSG_TYPE_FD,
     QEMU_EPC_MSG_TYPE_HDR,
     QEMU_EPC_MSG_TYPE_BAR,
+    QEMU_EPC_MSG_TYPE_ACCESS_BAR,
 };
 
 struct qemu_epc_req_hdr {
@@ -30,5 +32,14 @@ struct qemu_epc_resp_bar {
 struct qemu_epc_req_bar {
     uint8_t type;
 };
+
+struct qemu_epc_access_bar {
+    uint64_t offset;
+    uint64_t size;
+#define QEMU_EPC_ACCESS_BAR_READ 0
+#define QEMU_EPC_ACCESS_BAR_WRITE 1
+    uint8_t type;
+    uint8_t bar_no;
+} __attribute__((packed));
 
 #endif /* QEMU_EPC_H */
