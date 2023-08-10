@@ -24,6 +24,7 @@ struct EPCBridgeDevState {
 
     QemuThread recv_thread;
     int epfd;
+    int srv_fd;
     struct bar_meta_data {
         MemoryRegion region;
         struct EPCBridgeDevState *state;
@@ -46,8 +47,35 @@ static uint64_t epc_bridge_bar_read(void *opaque, hwaddr addr, unsigned size)
 static void epc_bridge_bar_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
     struct bar_meta_data *meta = opaque;
+    uint32_t type = QEMU_EPC_MSG_TYPE_ACCESS_BAR;
+    EPCBridgeDevState *d = meta->state;
+    struct qemu_epc_access_bar req = {
+        .offset = addr,
+        .size = size,
+        .type = QEMU_EPC_ACCESS_BAR_WRITE,
+        .bar_no = meta->bar_no,
+    };
+    ssize_t tsize;
 
     qemu_log("handle bar %d write\n", meta->bar_no);
+
+    tsize = send(d->epfd, &type, sizeof(type), 0);
+    if (tsize != sizeof(type)) {
+        qemu_log("failed the send\n");
+        return;
+    }
+
+    tsize = send(d->epfd, &req, sizeof(req), 0);
+    if (tsize != sizeof(req)) {
+        qemu_log("failed to send request to write BAR space: %ld != %ld\n", tsize, sizeof(req));
+        return;
+    }
+
+    tsize = send(d->epfd, &val, size, 0);
+    if (tsize != size) {
+        qemu_log("failed to send tx data\n");
+        return;
+    }
 }
 
 static const MemoryRegionOps epc_bridge_mmio_ops = {
@@ -223,6 +251,43 @@ static int epc_bridge_connect_server(EPCBridgeDevState *d, Error ** errp)
     return 0;
 }
 
+static int epc_bridge_create_and_pass_fd(EPCBridgeDevState *d, Error ** errp)
+{
+    ssize_t size;
+    struct iovec iov = {NULL, 0};
+    char cmsg[CMSG_SPACE(sizeof(d->srv_fd))];
+    struct msghdr mhdr = {
+        .msg_name = NULL,
+        .msg_namelen = 0,
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = cmsg,
+        .msg_controllen = sizeof(cmsg),
+        .msg_flags = 0,
+    };
+    struct cmsghdr *chdr = CMSG_FIRSTHDR(&mhdr);
+
+    d->srv_fd = memfd_create("epf-bridge.srvfd", 0);
+    if (d->srv_fd < 0)  {
+        qemu_log("failed to create memfd");
+        return -errno;
+    }
+
+    chdr->cmsg_level = SOL_SOCKET;
+    chdr->cmsg_type = SCM_RIGHTS;
+    chdr->cmsg_len = CMSG_LEN(sizeof(d->srv_fd));
+
+    *(int *)CMSG_DATA(chdr) = d->srv_fd;
+
+    size = sendmsg(d->epfd, &mhdr, 0);
+    if (size < 0) {
+        qemu_log("failed to send srv fd\n");
+        return -errno;
+    }
+
+    return 0;
+}
+
 static int epc_bridge_req_pci_config(EPCBridgeDevState *d, uint32_t offset, uint32_t size, void *buf)
 {
     ssize_t tsize;
@@ -300,6 +365,12 @@ static void epc_bridge_realize(PCIDevice *pci_dev, Error ** errp)
     err = epc_bridge_connect_server(d, errp);
     if (err) {
         qemu_log("failed to connect server\n");
+        return;
+    }
+
+    err = epc_bridge_create_and_pass_fd(d, errp);
+    if (err) {
+        qemu_log("failed to send fd\n");
         return;
     }
 
