@@ -42,4 +42,19 @@ struct qemu_epc_access_bar {
     uint8_t bar_no;
 } __attribute__((packed));
 
+/*
+ * send request to qemu epc bridge
+ */
+enum {
+    EPF_BRIDGE_MSG_IRQ,
+};
+
+struct epf_bridge_irq {
+#define EPF_BRIDGE_IRQ_TYPE_IRQ 1
+#define EPF_BRIDGE_IRQ_TYPE_MSI 2
+#define EPF_BRIDGE_IRQ_TYPE_MSIX 3
+    uint32_t type;
+    uint32_t num;
+} __attribute__((packed));
+
 #endif /* QEMU_EPC_H */

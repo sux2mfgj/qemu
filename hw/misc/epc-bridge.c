@@ -22,7 +22,7 @@ struct EPCBridgeDevState {
     PCIDevice parent_obj;
     /*< public >*/
 
-    QemuThread recv_thread;
+    QemuThread srv_thread;
     int epfd;
     int srv_fd;
     struct bar_meta_data {
@@ -251,11 +251,71 @@ static int epc_bridge_connect_server(EPCBridgeDevState *d, Error ** errp)
     return 0;
 }
 
-static int epc_bridge_create_and_pass_fd(EPCBridgeDevState *d, Error ** errp)
+static int epf_bridge_handle_irq(PCIDevice* pci_dev)
+{
+    struct epf_bridge_irq msg;
+    ssize_t size;
+    EPCBridgeDevState* state = EPC_BRIDGE(pci_dev);
+
+    size = recv(state->srv_fd, &msg, sizeof(msg), 0);
+    if (size != sizeof(msg)) {
+        qemu_log("msg\n");
+        return -1;
+    }
+
+    switch(msg.type) {
+        case EPF_BRIDGE_IRQ_TYPE_IRQ:
+            qemu_log("legacy irq is not yet supporeted\n");
+            break;
+        case EPF_BRIDGE_IRQ_TYPE_MSI:
+            msi_notify(pci_dev, msg.num);
+            break;
+        case EPF_BRIDGE_IRQ_TYPE_MSIX:
+            qemu_log("msi-x interrupt is not yet supporeted\n");
+            break;
+        default:
+            break;
+    }
+
+    return 0;
+}
+
+static void *epc_bridge_srv_thread(void *opaque)
+{
+    ssize_t size;
+    PCIDevice *pci_dev = opaque;
+    EPCBridgeDevState* state = EPC_BRIDGE(pci_dev);
+    uint32_t type;
+    int err;
+
+    while(1) {
+        size = recv(state->srv_fd, &type, sizeof(type), 0);
+        if (size != sizeof(type)) {
+            qemu_log("failed to recv msg type\n");
+            continue;
+        }
+
+        switch (type) {
+            case EPF_BRIDGE_IRQ_TYPE_IRQ:
+                err = epf_bridge_handle_irq(pci_dev);
+                if (err) {
+                    qemu_log("failed to handle irq request\n");
+                    continue;
+                }
+                break;
+            default:
+                qemu_log("invalid msg type found %d\n", type);
+        }
+    }
+
+    return NULL;
+}
+
+static int epc_bridge_pass_fd(EPCBridgeDevState *d, int fd)
 {
     ssize_t size;
     struct iovec iov = {NULL, 0};
-    char cmsg[CMSG_SPACE(sizeof(d->srv_fd))];
+    char cmsg[CMSG_SPACE(sizeof(fd))];
     struct msghdr mhdr = {
         .msg_name = NULL,
         .msg_namelen = 0,
@@ -266,18 +326,18 @@ static int epc_bridge_create_and_pass_fd(EPCBridgeDevState *d, Error ** errp)
         .msg_flags = 0,
     };
     struct cmsghdr *chdr = CMSG_FIRSTHDR(&mhdr);
-
-    d->srv_fd = memfd_create("epf-bridge.srvfd", 0);
-    if (d->srv_fd < 0)  {
-        qemu_log("failed to create memfd");
+    uint32_t type = QEMU_EPC_MSG_TYPE_FD;
+    size = send(d->epfd, &type, sizeof(type), 0);
+    if (size != sizeof(type)) {
+        qemu_log("failed to send fd msg\n");
         return -errno;
     }
 
     chdr->cmsg_level = SOL_SOCKET;
     chdr->cmsg_type = SCM_RIGHTS;
-    chdr->cmsg_len = CMSG_LEN(sizeof(d->srv_fd));
+    chdr->cmsg_len = CMSG_LEN(sizeof(fd));
 
-    *(int *)CMSG_DATA(chdr) = d->srv_fd;
+    *(int *)CMSG_DATA(chdr) = fd;
 
     size = sendmsg(d->epfd, &mhdr, 0);
     if (size < 0) {
@@ -286,6 +346,25 @@ static int epc_bridge_create_and_pass_fd(EPCBridgeDevState *d, Error ** errp)
     }
 
     return 0;
+}
+
+static int epc_bridge_launch_server(PCIDevice *pci_dev, Error ** errp)
+{
+    EPCBridgeDevState *d = EPC_BRIDGE(pci_dev);
+    int fd[2];
+    int err;
+
+    err = socketpair(AF_UNIX, SOCK_STREAM, 0, fd);
+    if (err < 0) {
+        qemu_log("failed to create socketpair\n");
+        return -errno;
+    }
+
+    d->srv_fd = fd[0];
+
+    qemu_thread_create(&d->srv_thread, "epc-bridge", epc_bridge_srv_thread, pci_dev, QEMU_THREAD_JOINABLE);
+
+    return epc_bridge_pass_fd(d, fd[1]);
 }
 
 static int epc_bridge_req_pci_config(EPCBridgeDevState *d, uint32_t offset, uint32_t size, void *buf)
@@ -311,7 +390,7 @@ static int epc_bridge_req_pci_config(EPCBridgeDevState *d, uint32_t offset, uint
 
     tsize = recv(d->epfd, buf, size, 0);
     if (tsize != size) {
-        qemu_log("failed to receive data");
+        qemu_log("failed to receive data\n");
         return -1;
     }
 
@@ -368,9 +447,9 @@ static void epc_bridge_realize(PCIDevice *pci_dev, Error ** errp)
         return;
     }
 
-    err = epc_bridge_create_and_pass_fd(d, errp);
+    err = epc_bridge_launch_server(pci_dev, errp);
     if (err) {
-        qemu_log("failed to send fd\n");
+        qemu_log("failed to launch server");
         return;
     }
 

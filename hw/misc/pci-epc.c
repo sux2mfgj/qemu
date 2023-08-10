@@ -76,6 +76,13 @@ typedef struct PCIEPCState {
 
     MemoryRegion ctrl, pci_cfg, bar_cfg;
     MemoryRegion window;
+    uint64_t ob_map_mask;
+    struct {
+        uint64_t phys;
+        uint64_t pci;
+        uint64_t size;
+    } ob_map[16];
+    uint8_t irq_type;
 
     uint8_t config_space[PCIE_CONFIG_SPACE_SIZE];
 
@@ -126,6 +133,8 @@ static int qemu_epc_handle_msg_fd(PCIEPCState *state)
 
     cmsghdr = CMSG_FIRSTHDR(&msg);
     state->ofd = *(int*)CMSG_DATA(cmsghdr);
+
+    qemu_log("got fd: %d\n", state->ofd);
 
     return 0;
 }
@@ -344,6 +353,10 @@ enum {
     QEMU_EP_CTRL_OFF_START = 0x00,
     QEMU_EP_CTRL_OFF_WIN_START = 0x8,
     QEMU_EP_CTRL_OFF_WIN_SIZE = 0x10,
+    QEMU_EP_CTRL_OFF_IRQ_TYPE = 0x18, 
+    QEMU_EP_CTRL_OFF_IRQ_NUM = 0x1c,
+    QEMU_EP_CTRL_OFF_OB_MAP_MASK = 0x20,
+    QEMU_EP_CTRL_OFF_OB_MAP_BASE = 0x28,
 };
 
 static uint64_t pciepc_mmio_ctl_read(void *opaque, hwaddr addr, unsigned size)
@@ -359,6 +372,27 @@ static uint64_t pciepc_mmio_ctl_read(void *opaque, hwaddr addr, unsigned size)
         return 0x100000;
     }
 
+    if (addr == QEMU_EP_CTRL_OFF_OB_MAP_MASK) {
+        return state->ob_map_mask;
+    }
+
+    return 0;
+}
+
+static int qemu_epc_send_irq(PCIEPCState* state, uint32_t irq_num)
+{
+    ssize_t size;
+    struct epf_bridge_irq msg = {
+        .type = state->irq_type,
+        .num = irq_num,
+    };
+
+    size = send(state->ofd, &msg, sizeof(msg), 0);
+    if (size != sizeof(msg)) {
+        qemu_log("failed to send irq message: %ld != %ld, err %d\n", size, sizeof(msg), errno);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -368,6 +402,7 @@ static void pciepc_mmio_ctl_write(void* opaque,
                               unsigned size)
 {
     PCIEPCState* state = opaque;
+    int err;
     qemu_log("%s:%d addr 0x%lx, val 0x%lx\n", __func__, __LINE__, addr, val);
 
     if (addr == QEMU_EP_CTRL_OFF_START && val == 1 && !state->srv_thread_running) {
@@ -377,6 +412,46 @@ static void pciepc_mmio_ctl_write(void* opaque,
         } else if (val == 0 && state->srv_thread_running){
             //TODO qemu_thread_join();
             state->srv_thread_running = false;
+        }
+        return;
+    }
+
+    switch(addr) {
+        case QEMU_EP_CTRL_OFF_OB_MAP_MASK:
+            state->ob_map_mask = val;
+            qemu_log("ob mask is updated 0x%lx\n", state->ob_map_mask);
+            break;
+        case QEMU_EP_CTRL_OFF_IRQ_TYPE:
+            state->irq_type = val;
+            break;
+        case QEMU_EP_CTRL_OFF_IRQ_NUM:
+            err = qemu_epc_send_irq(state, val);
+            if (err) {
+                qemu_log("failed to send irq\n");
+            }
+            break;
+    }
+
+    if (addr >= QEMU_EP_CTRL_OFF_OB_MAP_BASE) {
+        unsigned ob_idx = (addr - QEMU_EP_CTRL_OFF_OB_MAP_BASE) / 0x20;
+        uint64_t off = (addr - QEMU_EP_CTRL_OFF_OB_MAP_BASE) % 0x20;
+
+        qemu_log("outbound register index %d, off 0x%lx\n", ob_idx, off);
+
+        if (ob_idx > 15) {
+            qemu_log("invalid argument");
+            return;
+        }
+
+        if (off == 0) {
+            qemu_log("ob map %d: phys 0x%lx\n", ob_idx, val);
+            state->ob_map[ob_idx].phys = val;
+        } else if(off == 0x8) {
+            qemu_log("ob map %d: pci 0x%lx\n", ob_idx, val);
+            state->ob_map[ob_idx].pci = val;
+        } else if(off == 0x10) {
+            qemu_log("ob map %d: size 0x%lx\n", ob_idx, val);
+            state->ob_map[ob_idx].size = val;
         }
     }
 }
