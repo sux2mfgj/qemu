@@ -75,6 +75,7 @@ typedef struct PCIEPCState {
     int ofd;
 
     MemoryRegion ctrl, pci_cfg, bar_cfg;
+    MemoryRegion window;
 
     uint8_t config_space[PCIE_CONFIG_SPACE_SIZE];
 
@@ -341,12 +342,23 @@ static void *pci_epc_srv_thread(void *opaque)
 
 enum {
     QEMU_EP_CTRL_OFF_START = 0x00,
+    QEMU_EP_CTRL_OFF_WIN_START = 0x8,
+    QEMU_EP_CTRL_OFF_WIN_SIZE = 0x10,
 };
-
 
 static uint64_t pciepc_mmio_ctl_read(void *opaque, hwaddr addr, unsigned size)
 {
-    qemu_log("%s:%d\n", __func__, __LINE__);
+    PCIEPCState* state = opaque;
+
+    qemu_log("%s:%d addr 0x%lx, size 0x%x\n", __func__, __LINE__, addr, size);
+
+    if (addr == QEMU_EP_CTRL_OFF_WIN_START) {
+        return state->window.addr;
+    }
+    if (addr == QEMU_EP_CTRL_OFF_WIN_SIZE) {
+        return 0x100000;
+    }
+
     return 0;
 }
 
@@ -505,6 +517,24 @@ static const MemoryRegionOps pciepc_mmio_bar_cfg_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+static uint64_t pciepc_mmio_window_read(void* opaque, hwaddr addr, unsigned size)
+{
+    return 0;
+}
+
+static void pciepc_mmio_window_write(void* opaque,
+                              hwaddr addr,
+                              uint64_t val,
+                              unsigned size)
+{
+}
+
+static const MemoryRegionOps pciepc_window_ops = {
+    .read = pciepc_mmio_window_read,
+    .write = pciepc_mmio_window_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
 static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
 {
     PCIEPCState* state = PCI_EPC(pci_dev);
@@ -520,6 +550,9 @@ static void pci_epc_realize(PCIDevice* pci_dev, Error** errp)
     pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->bar_cfg);
     pci_register_bar(pci_dev, 2, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->ctrl);
 
+    memory_region_init_io(&state->window, OBJECT(state), &pciepc_window_ops,
+                          state, "pci-epc/window", 0x100000);
+    pci_register_bar(pci_dev, 3, PCI_BASE_ADDRESS_SPACE_MEMORY, &state->window);
 }
 
 static void pci_epc_class_init(ObjectClass* obj, void* data)
